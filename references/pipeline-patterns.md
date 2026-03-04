@@ -11,7 +11,8 @@ Stages must follow this ordering. Understanding categories helps compose valid p
 |----------|--------|-------|
 | **Source** (1, required) | `$source` | Must be first. One per pipeline. |
 | **Stateless Processing** | `$match`, `$project`, `$addFields`, `$unset`, `$unwind`, `$replaceRoot`, `$redact` | No state or memory overhead. Place `$match` first to reduce volume. |
-| **Enrichment** | `$lookup`, `$https` | I/O-bound. Use `parallelism` for throughput. Place `$https` after windows. |
+| **Enrichment** | `$lookup`, `$https`, `$externalFunction` | I/O-bound. Use `parallelism` for throughput. Place `$https` after windows. `$externalFunction` for Lambda (mid-pipeline, not terminal). |
+| **Validation** | `$validate` | Schema enforcement. Place early to catch bad data before expensive stages. |
 | **Stateful/Window** | `$tumblingWindow`, `$hoppingWindow`, `$sessionWindow` | Accumulates state in memory. Monitor `memoryUsageBytes`. |
 | **Custom Code** | `$function` | JavaScript UDFs. Requires SP30+. |
 | **Output** (1+, required) | `$merge`, `$emit` | Must be last. Required for deployed processors. |
@@ -23,6 +24,7 @@ Do NOT use these in streaming pipelines:
 - HTTPS connections as `$source` — HTTPS is for `$https` enrichment only
 - Kafka `$source` without `topic` — topic field is required
 - Pipelines without a sink — `$merge`/`$emit` required for deployed processors (sinkless only works via `sp.process()`)
+- Lambda connections as `$emit` target — Lambda uses `$externalFunction` (mid-pipeline stage), not `$emit`
 
 ## Source Patterns
 
@@ -56,10 +58,14 @@ With full document and pushdown pipeline:
 ```json
 {"$source": {
   "connectionName": "my-kinesis",
-  "streamName": "my-stream",
+  "stream": "my-stream",
+  "config": {"initialPosition": "TRIM_HORIZON"},
+  "shardIdleTimeout": {"size": 30, "unit": "second"},
   "consumerARN": "arn:aws:kinesis:us-east-1:123456789:stream/my-stream/consumer/my-consumer:123"
 }}
 ```
+
+`stream` (required): Kinesis stream name. `config.initialPosition`: `TRIM_HORIZON` (oldest, default) or `LATEST`. `shardIdleTimeout`: unblocks windows when shards go idle (like Kafka `partitionIdleTimeout`). `consumerARN` (optional): enables enhanced fan-out for dedicated throughput.
 
 ### Inline Documents (ephemeral testing only)
 ```json
@@ -114,7 +120,7 @@ Key formats: `string`, `json`, `int`, `long`, `binData`. Tombstone support: `"to
 
 ### $emit to Kinesis
 ```json
-{"$emit": {"connectionName": "my-kinesis", "streamName": "out", "partitionKey": "$device_id"}}
+{"$emit": {"connectionName": "my-kinesis", "stream": "out", "partitionKey": "$device_id"}}
 ```
 
 ### $emit to S3
@@ -189,6 +195,76 @@ Fields: `connectionName` (required), `bucket` (required), `path` (required — k
   "parallelism": 2
 }}
 ```
+
+### $externalFunction (Lambda)
+```json
+{"$externalFunction": {
+  "connectionName": "my-lambda",
+  "functionName": "my-function-name",
+  "execution": "async",
+  "as": "lambdaResult",
+  "onError": "dlq"
+}}
+```
+
+`execution`: `sync` (waits for Lambda result, adds latency) or `async` (fire-and-forget, lower latency). `$externalFunction` is a **mid-pipeline enrichment stage**, NOT a terminal sink — the pipeline still needs `$merge` or `$emit` after it. Do NOT use `$emit` to invoke Lambda.
+
+### $validate (Schema Validation)
+```json
+{"$validate": {
+  "validator": {"$jsonSchema": {
+    "required": ["device_id", "timestamp", "reading"],
+    "properties": {
+      "device_id": {"bsonType": "string"},
+      "reading": {"bsonType": "double"}
+    }
+  }},
+  "validationAction": "dlq"
+}}
+```
+
+`validationAction`: `"dlq"` (route invalid docs to DLQ — recommended), `"discard"` (silently drop invalid docs), `"error"` (crash processor on invalid doc — avoid in production). Place `$validate` early in the pipeline to catch bad data before expensive enrichment stages.
+
+### $function (JavaScript UDF)
+```json
+{"$addFields": {
+  "boostedWatts": {"$function": {
+    "body": "function(watts) { return watts * 1.2; }",
+    "args": ["$watts"],
+    "lang": "js"
+  }}
+}}
+```
+
+Note: Requires **SP30+ tier** due to JavaScript runtime overhead. `body`: JavaScript function as string. `args`: array of field references passed as arguments. `lang`: always `"js"`.
+
+## Array Normalization (Ref: `example_processors/array_explode/`)
+```json
+[
+  {"$source": {"connectionName": "my-kafka", "topic": "orders"}},
+  {"$unwind": "$items"},
+  {"$replaceRoot": {"newRoot": {"$mergeObjects": ["$items", {"orderId": "$orderId", "ts": "$timestamp"}]}}},
+  {"$merge": {"into": {"connectionName": "my-atlas", "db": "mydb", "coll": "line_items"}}}
+]
+```
+
+Explodes nested arrays into individual documents, preserving parent context via `$mergeObjects`. Common for order line items, log entries, and nested event payloads.
+
+## Dynamic Kafka Topic Routing
+```json
+{"$emit": {
+  "connectionName": "my-kafka",
+  "topic": {"$switch": {
+    "branches": [
+      {"case": {"$eq": ["$severity", "critical"]}, "then": "alerts-critical"},
+      {"case": {"$eq": ["$severity", "warning"]}, "then": "alerts-warning"}
+    ],
+    "default": "alerts-info"
+  }}
+}}
+```
+
+Routes documents to different Kafka topics based on field values. Useful for multi-tenant routing, priority-based fan-out, and per-category topic splitting.
 
 ## Real-Time Alerting with Severity Routing
 ```json

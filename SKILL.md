@@ -1,7 +1,7 @@
 ---
 name: streams-mcp-tools
 description: Build, operate, and debug Atlas Stream Processing through the MongoDB MCP Server. Use when user says "set up a Kafka pipeline", "deploy a stream processor", "add a connection to my workspace", "why is my processor failing", "stop my processor", "delete my workspace", "show me my Streams workspaces", or any task involving Atlas Stream Processing workspaces, connections, or processors. Do NOT use for general MongoDB queries, Atlas cluster management, or non-Streams Atlas operations.
-version: 3.0.1
+version: 3.3.0
 user-invocable: true
 ---
 
@@ -25,7 +25,7 @@ This repo is continuously updated with high-value customer-driven examples and c
 - Valid pipeline stage combinations and ordering
 - Correct `$source` and `$merge`/`$emit` syntax per connection type
 - Windowing patterns (tumbling, hopping, session)
-- Advanced patterns (joins, `$https` enrichment, dynamic routing, chained processors)
+- Advanced patterns (joins, `$https` enrichment, `$externalFunction` for Lambda, `$validate` schema validation, `$function` JavaScript UDFs, dynamic routing, chained processors)
 
 Key quickstart references:
 | Quickstart | Pattern |
@@ -46,6 +46,7 @@ These MongoDB aggregation features are **NOT valid** in streaming pipelines:
 - **HTTPS connections as `$source`** — HTTPS connections are for `$https` enrichment only, not as data sources
 - **Pipelines without a sink** — `$merge` or `$emit` is required for persistent (deployed) processors. Sinkless pipelines only work ephemerally via `sp.process()` in mongosh
 - **Kafka `$source` without `topic`** — Kafka sources MUST include a `topic` field
+- **Lambda connections as `$emit` target** — Lambda uses `$externalFunction` (mid-pipeline stage), not `$emit`
 
 ## Instructions
 
@@ -82,6 +83,25 @@ CRITICAL: This tool uses a `resource` enum. **Only fill fields for the selected 
 Fill: `projectId`, `workspaceName`, `cloudProvider`, `region`, `tier`, `includeSampleData`
 Leave empty: all connection and processor fields
 
+**CRITICAL — Region naming:** The `region` field uses Atlas-specific names that differ by cloud provider. Using the wrong format returns a cryptic `dataProcessRegion` error. Reference table:
+
+| Provider | Cloud Region | Atlas `region` Value |
+|----------|-------------|---------------------|
+| **AWS** | us-east-1 | `VIRGINIA_USA` |
+| **AWS** | us-east-2 | `US_EAST_2` |
+| **AWS** | us-west-2 | `OREGON_USA` |
+| **AWS** | ca-central-1 | `CA_CENTRAL_1` |
+| **AWS** | sa-east-1 | `SA_EAST_1` |
+| **AWS** | eu-west-1 | `IRELAND_IRL` |
+| **GCP** | us-central1 | `US_CENTRAL1` |
+| **GCP** | europe-west1 | `WESTERN_EUROPE` |
+| **Azure** | eastus | `US_EAST_1` |
+| **Azure** | eastus2 | `US_EAST_2` |
+| **Azure** | westus | `US_WEST` |
+| **Azure** | westeurope | `EUROPE_WEST` |
+
+**If the region format is unknown:** Inspect an existing workspace with `atlas-streams-discover` → `action: "inspect-workspace"` and check the `dataProcessRegion.region` field for the correct format.
+
 **resource = "connection":**
 Fill: `projectId`, `workspaceName`, `connectionName`, `connectionType`, `connectionConfig`
 Leave empty: all workspace and processor fields
@@ -92,11 +112,14 @@ Fill: `projectId`, `workspaceName`, `processorName`, `pipeline`, `dlq` (recommen
 Leave empty: all workspace and connection fields
 (See [references/pipeline-patterns.md](references/pipeline-patterns.md) for pipeline examples)
 
-**Before creating a processor:** Validate the pipeline against authoritative sources before calling `atlas-streams-build`:
-1. **`search-knowledge`** — call with a query like "Atlas Stream Processing $emit S3" to confirm the correct `$emit`/`$merge` field names. This is the authoritative source for exact field schemas, especially for less common sink types (S3, Kinesis, Lambda).
-2. **ASP_example repo** — for end-to-end pipeline patterns, fetch the relevant quickstart or example from `https://raw.githubusercontent.com/mongodb/ASP_example/main/` using `WebFetch`. Key files: `quickstarts/` (6 quickstarts), `example_processors/` (15+ patterns), `code_snippets/` (reusable stages). The repo is continuously updated by MongoDB engineering and is the best source for validated pipeline compositions.
+**Before creating a processor — REQUIRED validation steps:**
 
-The reference files in this skill cover common patterns, but cross-checking with the above sources prevents field name errors and invalid stage combinations.
+You MUST call `search-knowledge` before composing any processor pipeline. This is not optional — the reference files in this skill cover common patterns, but `search-knowledge` is the authoritative source for exact field schemas and catches field name errors that skill references alone may not prevent.
+
+1. **`search-knowledge` (REQUIRED)** — call with a query describing the sink/source type, e.g. "Atlas Stream Processing $emit S3 fields" or "Atlas Stream Processing Kafka $source configuration". Do this even if you think you know the answer from skill references. This call validates field names and catches errors like using `prefix` instead of `path` for S3 `$emit`.
+2. **ASP_example repo (recommended for complex pipelines)** — for end-to-end pipeline patterns, fetch the relevant quickstart or example from `https://raw.githubusercontent.com/mongodb/ASP_example/main/` using `WebFetch`. Key files: `quickstarts/` (6 quickstarts), `example_processors/` (15+ patterns), `code_snippets/` (reusable stages).
+
+The skill's reference files provide a starting point, but always cross-check with `search-knowledge` before calling `atlas-streams-build` with `resource: "processor"`.
 
 **resource = "privatelink":**
 Fill: `projectId`, `workspaceName`, `privateLinkProvider`, `privateLinkConfig`
@@ -123,7 +146,7 @@ Always fill: `projectId`, `workspaceName`. Then by action:
 - `"stop-processor"` → `resourceName`
 - `"modify-processor"` → `resourceName`. At least one of: `pipeline`, `dlq`, `newName`
 - `"update-workspace"` → `newRegion` or `newTier`
-- `"update-connection"` → `resourceName`, `connectionConfig`
+- `"update-connection"` → `resourceName`, `connectionConfig`. Works for updating credentials, bootstrap servers, and other config. **Exception: networking config (e.g., PrivateLink) cannot be modified after creation** — to change networking, delete and recreate the connection.
 - `"accept-peering"` → `peeringId`, `requesterAccountId`, `requesterVpcId`
 - `"reject-peering"` → `peeringId`
 
@@ -158,15 +181,21 @@ See [references/development-workflow.md](references/development-workflow.md) for
 
 **Debug a failing processor:**
 See [references/output-diagnostics.md](references/output-diagnostics.md) for the full decision framework.
-1. `atlas-streams-discover` → `action: "diagnose-processor"` — one-shot health report
-2. `atlas-streams-discover` → `action: "get-logs"` (defaults to `logType: "operational"`) — runtime errors, Kafka failures, schema issues, OOM messages. Filter by `resourceName` for a specific processor.
-3. Classify processor type before interpreting output volume:
+1. `atlas-streams-discover` → `action: "diagnose-processor"` — one-shot health report. Always call this first.
+2. `atlas-streams-discover` → `action: "get-logs"` (defaults to `logType: "operational"`) — runtime errors, Kafka failures, schema issues, OOM messages. Filter by `resourceName` for a specific processor. Always call this second.
+3. **Commit to a specific root cause.** After reviewing the diagnose output and logs, identify THE primary issue — do not present a list of hypothetical scenarios. The diagnostic data will contain specific error codes, state transitions, and stats that point to one root cause. Common patterns:
+   - **Error 419 + "no partitions found"** → Kafka topic doesn't exist or is misspelled
+   - **State: FAILED + multiple restarts** → connection-level error (bypasses DLQ), check logs for the repeated error
+   - **State: STARTED + zero output + windowed pipeline** → likely idle Kafka partitions blocking window closure; check for missing `partitionIdleTimeout`
+   - **State: STARTED + zero output + non-windowed** → check if source has data; inspect Kafka offset lag
+   - **High memoryUsageBytes approaching tier limit** → OOM risk; recommend higher tier
+   - **DLQ count increasing** → per-document processing errors; use MongoDB `find` on DLQ collection
+4. Classify processor type before interpreting output volume:
    - **Alert/anomaly processors**: low or zero output is NORMAL and healthy
    - **Data transformation processors**: low output is a RED FLAG
    - **Filter processors**: variable output depending on data match rate
-4. If DLQ analysis needed → use the MongoDB `find` tool on the DLQ collection (not a Streams tool)
-5. If lifecycle event history needed → `atlas-streams-discover` → `action: "get-logs"`, `logType: "audit"` — shows start/stop events
-6. Based on diagnosis: stop → modify → restart, or investigate connection health
+5. Provide concrete, ordered fix steps specific to the diagnosed root cause (e.g., "stop → modify pipeline to add partitionIdleTimeout → restart with resumeFromCheckpoint: false").
+6. If lifecycle event history needed → `atlas-streams-discover` → `action: "get-logs"`, `logType: "audit"` — shows start/stop events
 
 **Tear down:**
 Delete workspace directly (removes all contained resources), or individually: delete processors (auto-stops if running) → delete connections (fails if referenced by running processors) → delete workspace.
@@ -200,13 +229,16 @@ These are built-in behaviors of the MCP tools — do not duplicate this logic ma
 ## Pre-Deploy Quality Checklist
 
 Before creating a processor, verify:
+- [ ] `search-knowledge` was called to validate sink/source field names
 - [ ] Pipeline starts with `$source` and ends with `$merge` or `$emit`
 - [ ] No `$$NOW`, `$$ROOT`, or `$$CURRENT` in the pipeline
 - [ ] Kafka `$source` includes a `topic` field
+- [ ] Kafka `$source` with windowed pipeline includes `partitionIdleTimeout` (prevents windows from stalling on idle partitions)
 - [ ] HTTPS connections are only used in `$https` enrichment stages, not in `$source`
 - [ ] All `connectionName` references match actual connections in the workspace (use `discover` → `list-connections` to verify)
 - [ ] DLQ is configured (recommended for production)
 - [ ] `$https` stages use `onError: "dlq"` (not `"fail"`)
+- [ ] `$externalFunction` stages use `onError: "dlq"` and `execution` is explicitly set
 - [ ] API auth is stored in connection settings, not hardcoded in the pipeline
 
 ## Post-Deploy Verification Workflow
@@ -259,8 +291,10 @@ See [references/sizing-and-parallelism.md](references/sizing-and-parallelism.md)
 | "must choose at least one role" | Cluster connection without `dbRoleToExecute` | Defaults to `readWriteAnyDatabase` — or specify custom role |
 | "No cluster named X" | Cluster doesn't exist in project | `atlas-list-clusters` to verify |
 | IAM role ARN not found | ARN not registered in project | Register via Atlas → Cloud Provider Access |
-| dataProcessRegion format | Wrong region format | Use Atlas names: `VIRGINIA_USA`, not `US_EAST_1` |
+| dataProcessRegion format | Wrong region format | See region reference table in Step 2 workspace section. AWS uses names like `VIRGINIA_USA`, GCP uses `US_CENTRAL1`, Azure uses `US_EAST_1`. If unsure, inspect an existing workspace to see the correct format. |
 | Low/zero processor output | May be normal for alert-type processors | Classify processor type before assuming a problem |
+| Windowed processor "stuck" | Idle Kafka partitions blocking window closure | Add `partitionIdleTimeout` to Kafka `$source` (e.g., `{"size": 30, "unit": "second"}`) |
+| Processor PROVISIONING for minutes | Restart cycle with exponential backoff | Wait for FAILED state, or stop → restart. Check logs for repeated error |
 | `$$NOW` / `$$ROOT` / `$$CURRENT` in pipeline | Invalid in streaming context | Remove these system variables; use alternative approaches |
 
 ## Billing & Cost Awareness

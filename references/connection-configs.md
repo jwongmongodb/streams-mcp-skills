@@ -44,6 +44,12 @@ For Confluent Cloud, use `mechanism: "PLAIN"` with your API key as `username` an
 
 Kafka supports PrivateLink networking with Confluent Cloud on AWS (see Terraform examples in the ASP_example repo: `terraform/privatelinkConfluentAWS.tf`).
 
+**Important: Networking cannot be modified after connection creation.** To add or change PrivateLink on an existing Kafka connection, you must delete it and recreate it with the networking config. The `networking.access` field format is:
+```json
+"networking": {"access": {"type": "PRIVATE_LINK", "connectionId": "<Atlas PrivateLink ID>"}}
+```
+The `connectionId` is the Atlas PrivateLink `_id` (not the AWS service endpoint ID). Use `atlas-streams-discover` → `get-networking` to list available PrivateLink endpoints.
+
 ### Cluster (Atlas)
 ```json
 {
