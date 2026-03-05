@@ -1,7 +1,7 @@
 ---
 name: streams-mcp-tools
 description: Build, operate, and debug Atlas Stream Processing through the MongoDB MCP Server. Use when user says "set up a Kafka pipeline", "deploy a stream processor", "add a connection to my workspace", "why is my processor failing", "stop my processor", "delete my workspace", "show me my Streams workspaces", or any task involving Atlas Stream Processing workspaces, connections, or processors. Do NOT use for general MongoDB queries, Atlas cluster management, or non-Streams Atlas operations.
-version: 3.3.0
+version: 3.4.0
 user-invocable: true
 ---
 
@@ -106,6 +106,31 @@ Leave empty: all connection and processor fields
 Fill: `projectId`, `workspaceName`, `connectionName`, `connectionType`, `connectionConfig`
 Leave empty: all workspace and processor fields
 (See [references/connection-configs.md](references/connection-configs.md) for type-specific schemas)
+
+**Connection Capabilities — Source/Sink Reference:**
+
+Know what each connection type can do before creating pipelines:
+
+| Connection Type | As Source ($source) | As Sink ($merge / $emit) | Mid-Pipeline | Notes |
+|-----------------|---------------------|--------------------------|--------------|-------|
+| **Cluster** | ✅ Change streams | ✅ $merge to collections | ✅ $lookup | Change streams monitor insert/update/delete/replace operations |
+| **Kafka** | ✅ Topic consumer | ✅ $emit to topics | ❌ | Source MUST include `topic` field |
+| **Sample Stream** | ✅ Sample data | ❌ Not valid | ❌ | Testing/demo only |
+| **S3** | ❌ Not valid | ✅ $emit to buckets | ❌ | Sink only - use `path`, `format`, `compression` |
+| **Https** | ❌ Not valid | ✅ $https as sink | ✅ $https enrichment | Can be used mid-pipeline for enrichment OR as final sink stage |
+| **AWSLambda** | ❌ Not valid | ✅ $externalFunction (async only) | ✅ $externalFunction (sync or async) | **Sink:** `execution: "async"` required. **Mid-pipeline:** `execution: "sync"` or `"async"` |
+| **AWS Kinesis** | ✅ Stream consumer | ✅ $emit to streams | ❌ | Similar to Kafka pattern |
+| **SchemaRegistry** | ❌ Not valid | ❌ Not valid | ✅ Schema resolution | **Metadata only** - used by Kafka connections for Avro schemas |
+
+**Common connection usage mistakes to avoid:**
+- ❌ Using HTTPS connections as `$source` → HTTPS is for enrichment or sink only
+- ❌ Using `$externalFunction` as sink with `execution: "sync"` → Must use `execution: "async"` for sink stage
+- ❌ Forgetting change streams exist → Atlas Cluster is a powerful source, not just a sink
+- ❌ Using `$merge` with Kafka → Use `$emit` for Kafka sinks
+
+**$externalFunction execution modes:**
+- **Mid-pipeline:** Can use `execution: "sync"` (blocks until Lambda returns) or `execution: "async"` (non-blocking)
+- **Final sink stage:** MUST use `execution: "async"` only
 
 **resource = "processor":**
 Fill: `projectId`, `workspaceName`, `processorName`, `pipeline`, `dlq` (recommended), `autoStart` (optional)
