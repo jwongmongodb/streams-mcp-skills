@@ -2,6 +2,45 @@
 
 **Official examples repo**: https://github.com/mongodb/ASP_example
 
+## Connection Naming Best Practices
+
+**CRITICAL**: Connection names should clearly indicate their actual targets to avoid confusion and prevent writing data to wrong destinations.
+
+### Good Naming Patterns
+
+**Match the actual target name:**
+- Cluster connection to "ClusterRestoreTest" → name it `cluster-restore-test` or `ClusterRestoreTest`
+- Cluster connection to "AtlasCluster" → name it `atlas-cluster` or `AtlasCluster`
+
+**Use descriptive names with context:**
+- `prod-kafka-orders` (indicates environment + service + purpose)
+- `dev-atlas-main` (indicates environment + service + designation)
+- `staging-s3-exports` (indicates environment + service + purpose)
+
+### Bad Naming Patterns (AVOID)
+
+❌ **Generic names that don't match targets:**
+- Connection "atlascluster" pointing to "ClusterRestoreTest" ← CONFUSING!
+- Connection "kafka" pointing to multiple different topics ← NOT SPECIFIC!
+
+❌ **Reusing names across workspaces without context:**
+- "myconnection" in workspace A and workspace B with different targets
+
+❌ **Names that don't indicate connection type:**
+- "connection1", "test", "temp" ← NO CONTEXT!
+
+### Verification Workflow
+
+**Before creating processors**, always inspect your connections to verify they point where you expect:
+```
+1. atlas-streams-discover → action: "list-connections"
+2. atlas-streams-discover → action: "inspect-connection" for each
+3. Verify connection name matches actual target (clusterName, bootstrapServers, url, etc.)
+4. If mismatch exists, consider renaming or warn the user
+```
+
+See [development-workflow.md](development-workflow.md) "Pre-Deployment Connection Validation" section for the complete validation procedure.
+
 ## Important Notes
 - HTTPS connections are for `$https` enrichment ONLY — they are NOT valid as `$source` data sources
 - Store API authentication in connection settings, never hardcode in processor pipelines
@@ -42,13 +81,23 @@ Security protocols: `SASL_SSL`, `SASL_PLAINTEXT`, `SSL`
 
 For Confluent Cloud, use `mechanism: "PLAIN"` with your API key as `username` and API secret as `password`.
 
-Kafka supports PrivateLink networking with Confluent Cloud on AWS (see Terraform examples in the ASP_example repo: `terraform/privatelinkConfluentAWS.tf`).
+Kafka supports both **PrivateLink** and **VPC Peering** for private networking:
 
-**Important: Networking cannot be modified after connection creation.** To add or change PrivateLink on an existing Kafka connection, you must delete it and recreate it with the networking config. The `networking.access` field format is:
-```json
-"networking": {"access": {"type": "PRIVATE_LINK", "connectionId": "<Atlas PrivateLink ID>"}}
-```
-The `connectionId` is the Atlas PrivateLink `_id` (not the AWS service endpoint ID). Use `atlas-streams-discover` → `get-networking` to list available PrivateLink endpoints.
+**PrivateLink:**
+- Supported with Confluent Cloud on AWS (see Terraform examples in the ASP_example repo: `terraform/privatelinkConfluentAWS.tf`)
+- Requires both the Stream Processing workspace and Kafka cluster to be on AWS
+- Format: `"networking": {"access": {"type": "PRIVATE_LINK", "connectionId": "<Atlas PrivateLink ID>"}}`
+- The `connectionId` is the Atlas PrivateLink `_id` (not the AWS service endpoint ID)
+
+**VPC Peering:**
+- Supported for outbound connections to Kafka brokers in your own VPC
+- Requires `SASL_SSL` security protocol
+- Use `atlas-streams-manage` with `accept-peering` action to complete the peering setup
+- Requires AWS account ID, VPC ID, and region information
+
+**Important: Networking cannot be modified after connection creation.** To add or change PrivateLink/VPC peering on an existing Kafka connection, you must delete it and recreate it with the networking config.
+
+Use `atlas-streams-discover` → `action: "get-networking"` to list available PrivateLink endpoints and VPC peering connections.
 
 ### Cluster (Atlas)
 ```json

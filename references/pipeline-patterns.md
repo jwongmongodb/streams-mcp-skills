@@ -11,11 +11,11 @@ Stages must follow this ordering. Understanding categories helps compose valid p
 |----------|--------|-------|
 | **Source** (1, required) | `$source` | Must be first. One per pipeline. |
 | **Stateless Processing** | `$match`, `$project`, `$addFields`, `$unset`, `$unwind`, `$replaceRoot`, `$redact` | No state or memory overhead. Place `$match` first to reduce volume. |
-| **Enrichment** | `$lookup`, `$https`, `$externalFunction` | I/O-bound. Use `parallelism` for throughput. Place `$https` after windows. `$externalFunction` for Lambda (mid-pipeline, not terminal). |
+| **Enrichment** | `$lookup`, `$https`, `$externalFunction` (sync/async) | I/O-bound. Use `parallelism` for throughput. `$https` and `$externalFunction` can be mid-pipeline enrichment OR terminal sink. For sinks: `$https` sends to webhooks/APIs, `$externalFunction` requires `execution: "async"`. |
 | **Validation** | `$validate` | Schema enforcement. Place early to catch bad data before expensive stages. |
 | **Stateful/Window** | `$tumblingWindow`, `$hoppingWindow`, `$sessionWindow` | Accumulates state in memory. Monitor `memoryUsageBytes`. |
 | **Custom Code** | `$function` | JavaScript UDFs. Requires SP30+. |
-| **Output** (1+, required) | `$merge`, `$emit` | Must be last. Required for deployed processors. |
+| **Output** (1+, required) | `$merge`, `$emit`, `$https`, `$externalFunction` (async only) | Must be last. Required for deployed processors. |
 
 ## Invalid Constructs
 
@@ -24,7 +24,7 @@ Do NOT use these in streaming pipelines:
 - HTTPS connections as `$source` — HTTPS is for `$https` enrichment only
 - Kafka `$source` without `topic` — topic field is required
 - Pipelines without a sink — `$merge`/`$emit` required for deployed processors (sinkless only works via `sp.process()`)
-- Lambda connections as `$emit` target — Lambda uses `$externalFunction` (mid-pipeline stage), not `$emit`
+- Lambda connections with `$emit` — Lambda uses `$externalFunction` (can be mid-pipeline or terminal sink with async execution), not `$emit`
 
 ## Source Patterns
 
@@ -133,6 +133,39 @@ Key formats: `string`, `json`, `int`, `long`, `binData`. Tombstone support: `"to
 ```
 Fields: `connectionName` (required), `bucket` (required), `path` (required — key prefix string or expression), `region` (optional), `config` (optional — `outputFormat`, `writeOptions`, `delimiter`, `compression`).
 
+### $https as Sink (webhook/API)
+```json
+{"$https": {
+  "connectionName": "my-webhook",
+  "path": "/events",
+  "method": "POST",
+  "onError": "dlq"
+}}
+```
+
+When used as a **final sink stage**, `$https` sends processed documents to an external HTTP endpoint. Unlike mid-pipeline usage (which enriches documents with API responses), sink usage doesn't expect a response to merge back into the document. Useful for:
+- Sending data to webhooks
+- Posting to external APIs
+- Triggering external systems
+
+### $externalFunction as Sink (Lambda async)
+```json
+{"$externalFunction": {
+  "connectionName": "my-lambda",
+  "functionName": "arn:aws:lambda:us-west-1:123456789:function:my-function",
+  "execution": "async",
+  "onError": "dlq"
+}}
+```
+
+**Important**: When used as a **final sink stage**, `$externalFunction` MUST use `execution: "async"`. This fires off the Lambda function without waiting for a response, useful for:
+- Triggering downstream AWS applications or analytics
+- Notifying external systems
+- Firing off alerts or billing logic
+- Propagating data to external workflows
+
+Unlike mid-pipeline usage (where `execution: "sync"` is allowed for enrichment), sink usage requires async execution only. The pipeline still needs this as the terminal stage — you cannot use `$emit` to invoke Lambda.
+
 ## Window Patterns
 
 ### Tumbling (Ref: `quickstarts/01_changestream_basic.json`)
@@ -196,18 +229,27 @@ Fields: `connectionName` (required), `bucket` (required), `path` (required — k
 }}
 ```
 
-### $externalFunction (Lambda)
+### $externalFunction (Lambda - Mid-Pipeline Enrichment)
 ```json
 {"$externalFunction": {
   "connectionName": "my-lambda",
   "functionName": "my-function-name",
-  "execution": "async",
+  "execution": "sync",
   "as": "lambdaResult",
-  "onError": "dlq"
+  "onError": "dlq",
+  "payload": [
+    {"$project": {"userId": 1, "data": 1}}
+  ]
 }}
 ```
 
-`execution`: `sync` (waits for Lambda result, adds latency) or `async` (fire-and-forget, lower latency). `$externalFunction` is a **mid-pipeline enrichment stage**, NOT a terminal sink — the pipeline still needs `$merge` or `$emit` after it. Do NOT use `$emit` to invoke Lambda.
+**Mid-pipeline usage:**
+- `execution`: `sync` (waits for Lambda result, stores in `as` field) or `async` (non-blocking)
+- `as`: Field name to store Lambda response (required for `sync`, ignored for `async`)
+- `payload`: Optional inner pipeline to customize request body sent to Lambda
+- Use for enriching/transforming documents before downstream stages
+
+**Sink usage:** See the Sink Patterns section. When used as final stage, MUST use `execution: "async"` only.
 
 ### $validate (Schema Validation)
 ```json

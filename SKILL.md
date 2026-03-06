@@ -183,13 +183,32 @@ Always fill: `projectId`, `resource`. Then:
 - `resource: "connection"` or `"processor"` → `workspaceName`, `resourceName`
 - `resource: "privatelink"` or `"peering"` → `resourceName` (the ID)
 
+**CRITICAL — Before deleting a workspace:**
+You MUST call `atlas-streams-discover` → `action: "inspect-workspace"` first to get the current count of connections and processors. Then present this information to the user BEFORE asking for confirmation:
+- Number of connections that will be deleted (list their names and types)
+- Number of processors that will be deleted (list their names and states)
+- Make it clear this action is permanent and cannot be undone
+
+Example workflow:
+1. User: "delete workspace X"
+2. Call `inspect-workspace` for workspace X
+3. Present: "Workspace X contains 2 connections (kafka, mongodb_atlas) and 3 processors (processor1: STOPPED, processor2: STARTED, processor3: CREATED). Deleting this workspace will permanently remove all of these resources. Proceed?"
+4. Wait for user confirmation
+5. Call `atlas-streams-teardown`
+
 ### Step 3: Sequence multi-step workflows
 
 **Setup from scratch:**
 1. `atlas-streams-build` → `resource: "workspace"` (cloud, region, tier)
 2. `atlas-streams-build` → `resource: "connection"` (one call per connection)
-3. `atlas-streams-build` → `resource: "processor"` (reference connections by name in pipeline)
-4. Set `autoStart: true` in step 3, or call `atlas-streams-manage` → `action: "start-processor"`
+3. **BEFORE creating processor - REQUIRED VALIDATION**:
+   - Call `atlas-streams-discover` → `action: "list-connections"` to verify all required connections exist
+   - Call `atlas-streams-discover` → `action: "inspect-connection"` for EACH connection referenced in your pipeline
+   - Verify connection names match their actual targets (e.g., connection "atlascluster" should actually point to the intended cluster)
+   - Present connection summary to user showing any name/target mismatches
+   - Ask for confirmation before proceeding if mismatches exist
+4. `atlas-streams-build` → `resource: "processor"` (reference connections by name in pipeline)
+5. Set `autoStart: true` in step 4, or call `atlas-streams-manage` → `action: "start-processor"`
 
 **Incremental pipeline development (recommended):**
 See [references/development-workflow.md](references/development-workflow.md) for the full 5-phase lifecycle.
@@ -223,7 +242,9 @@ See [references/output-diagnostics.md](references/output-diagnostics.md) for the
 6. If lifecycle event history needed → `atlas-streams-discover` → `action: "get-logs"`, `logType: "audit"` — shows start/stop events
 
 **Tear down:**
-Delete workspace directly (removes all contained resources), or individually: delete processors (auto-stops if running) → delete connections (fails if referenced by running processors) → delete workspace.
+**BEFORE deleting a workspace**, inspect it first with `atlas-streams-discover` → `action: "inspect-workspace"` to determine how many connections and processors will be deleted. Present this information to the user and wait for confirmation before proceeding.
+
+You can delete workspace directly (removes all contained resources), or delete individually: delete processors (auto-stops if running) → delete connections (fails if referenced by running processors) → delete workspace.
 
 **Chained processors:**
 Multiple processors can be chained: processor A writes to an Atlas collection via `$merge`, processor B reads from that collection via change stream `$source`. This enables multi-stage processing pipelines.
@@ -249,18 +270,28 @@ These are built-in behaviors of the MCP tools — do not duplicate this logic ma
 **Teardown safety checks:**
 - **Processor deletion** → auto-stops the processor before deleting (no need to stop manually first)
 - **Connection deletion** → scans all processor pipelines for references; **blocks deletion** if any running processor uses the connection. Stop/delete referencing processors first.
-- **Workspace deletion** → counts connections and processors, reports the full impact before deleting
+- **Workspace deletion** → YOU must inspect the workspace first with `atlas-streams-discover` to count connections and processors, then present this to the user before calling the teardown tool. The teardown tool will then delete the workspace and all contained resources permanently.
 
 ## Pre-Deploy Quality Checklist
 
 Before creating a processor, verify:
+
+### Connection Validation (MANDATORY - Always do this first)
+- [ ] **CRITICAL**: Call `atlas-streams-discover` → `action: "list-connections"` to list all connections in workspace
+- [ ] **CRITICAL**: Call `atlas-streams-discover` → `action: "inspect-connection"` for EACH connection referenced in pipeline
+- [ ] **CRITICAL**: Verify connection names clearly indicate their actual targets (avoid generic names like "atlascluster" pointing to "ClusterRestoreTest")
+- [ ] **CRITICAL**: Present connection summary to user: "Connection 'X' → Actual target 'Y'" for each connection
+- [ ] **CRITICAL**: Warn user if connection names don't match their targets and ask for confirmation
+- [ ] All connections are in READY state
+- [ ] Connection types match usage (Cluster for $source/$merge, Kafka for topics, etc.)
+
+### Pipeline Validation
 - [ ] `search-knowledge` was called to validate sink/source field names
-- [ ] Pipeline starts with `$source` and ends with `$merge` or `$emit`
+- [ ] Pipeline starts with `$source` and ends with `$merge`, `$emit`, `$https`, or `$externalFunction` (async)
 - [ ] No `$$NOW`, `$$ROOT`, or `$$CURRENT` in the pipeline
 - [ ] Kafka `$source` includes a `topic` field
 - [ ] Kafka `$source` with windowed pipeline includes `partitionIdleTimeout` (prevents windows from stalling on idle partitions)
-- [ ] HTTPS connections are only used in `$https` enrichment stages, not in `$source`
-- [ ] All `connectionName` references match actual connections in the workspace (use `discover` → `list-connections` to verify)
+- [ ] HTTPS connections are only used in `$https` enrichment or sink stages, not in `$source`
 - [ ] DLQ is configured (recommended for production)
 - [ ] `$https` stages use `onError: "dlq"` (not `"fail"`)
 - [ ] `$externalFunction` stages use `onError: "dlq"` and `execution` is explicitly set
@@ -342,6 +373,8 @@ Do NOT retry. Instead:
 ## Safety Rules
 
 - `atlas-streams-teardown` and `atlas-streams-manage` require user confirmation — do not bypass
+- **BEFORE calling `atlas-streams-teardown` for a workspace**, you MUST first inspect the workspace with `atlas-streams-discover` to count connections and processors, then present this information to the user before requesting confirmation
+- **BEFORE creating any processor**, you MUST validate all connections per the "Pre-Deployment Validation" section in [references/development-workflow.md](references/development-workflow.md)
 - Deleting a workspace removes ALL connections and processors permanently
 - Processors must be STOPPED before modifying their pipeline
 - After stopping, state is preserved 45 days — then checkpoints are discarded

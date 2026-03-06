@@ -58,6 +58,64 @@ Understanding stage categories helps compose valid pipelines. Stages must appear
 
 **Goal:** Working processor with validated pipeline.
 
+#### Pre-Deployment Connection Validation (MANDATORY)
+
+**BEFORE creating any processor**, you MUST validate all connections referenced in your pipeline. This prevents silent failures and confusion about data destinations.
+
+**Step 1: List all connections in workspace**
+```
+atlas-streams-discover → action: "list-connections", workspaceName: "<your-workspace>"
+```
+Verify all required connections exist.
+
+**Step 2: Inspect EACH connection referenced in pipeline**
+
+For EVERY `connectionName` in your pipeline (source, sink, enrichment), inspect it:
+```
+atlas-streams-discover → action: "inspect-connection",
+                         workspaceName: "<your-workspace>",
+                         resourceName: "<connection-name>"
+```
+
+**Verify for each connection:**
+- [ ] Connection exists and state is READY
+- [ ] Connection type matches intended usage:
+  - Cluster: valid for `$source` (change streams), `$merge`, `$lookup`
+  - Kafka: valid for `$source`, `$emit`
+  - S3: valid for `$emit` only
+  - Https: valid for `$https` enrichment or sink
+  - Lambda: valid for `$externalFunction` only
+- [ ] Connection name matches actual target (avoid confusion):
+  - ⚠️ BAD: connection "atlascluster" → actual target "ClusterRestoreTest"
+  - ✅ GOOD: connection "cluster-restore-test" → actual target "ClusterRestoreTest"
+- [ ] For Cluster connections: verify the `clusterName` field points to the intended cluster
+
+**Step 3: Present validation summary to user**
+
+Always show the user what connections will be used:
+```
+"Before creating processor '<name>', I've verified your connections:
+ - ✅ sample_stream_solar → Sample data (READY)
+ - ⚠️ atlascluster → ClusterRestoreTest (READY)
+      Warning: Connection name 'atlascluster' doesn't match actual cluster 'ClusterRestoreTest'
+ - ✅ open-meteo-api → https://api.open-meteo.com/v1/... (READY)
+
+Proceed with processor creation?"
+```
+
+**Step 4: Wait for user confirmation if warnings exist**
+
+If any connection name doesn't match its target, ask the user to confirm before proceeding.
+
+**Step 5: Only then create the processor**
+
+This validation workflow prevents:
+- Creating processors with non-existent connections (fails immediately)
+- Writing data to unexpected clusters (e.g., "atlascluster" → "ClusterRestoreTest" instead of "AtlasCluster")
+- Confusion when verifying output data later
+
+#### Incremental Pipeline Development
+
 Follow incremental pipeline development — test at each step:
 
 **Step 1: Basic connectivity**
@@ -149,7 +207,8 @@ Modify pipeline (`stop` → `modify-processor` → `start`). Verify filtered out
    - Invalid pipeline syntax (missing `$source`, missing sink)
    - `$$NOW`/`$$ROOT`/`$$CURRENT` used (not valid in streaming)
    - Kafka `$source` missing `topic` field
-   - Referenced connection doesn't exist
+   - **Referenced connection doesn't exist** — validate with `list-connections` first
+   - **Connection name doesn't match expected target** — inspect connection to verify actual cluster/resource
    - OOM — tier too small for pipeline complexity
 
 ### Processing Errors (Running but DLQ filling up)
