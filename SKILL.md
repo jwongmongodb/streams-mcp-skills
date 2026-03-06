@@ -86,6 +86,11 @@ If the MongoDB MCP Server is not connected or the streams tools are missing:
 - `stop-processor` → no-ops if already STOPPED or CREATED (not an error)
 - `modify-processor` → errors if processor is STARTED (must stop first)
 
+**Teardown safety checks:**
+- **Processor deletion** → auto-stops before deleting (no need to stop manually first)
+- **Connection deletion** → blocks if any running processor references it. Stop/delete referencing processors first.
+- **Workspace deletion** → YOU must inspect first with `atlas-streams-discover` to count connections and processors, then present this to the user before calling teardown.
+
 ### atlas-streams-teardown — ALL delete operations
 | Resource | Safety behavior |
 |----------|----------------|
@@ -99,6 +104,11 @@ If the MongoDB MCP Server is not connected or the streams tools are missing:
 - `resource: "workspace"` → `workspaceName`
 - `resource: "connection"` or `"processor"` → `workspaceName`, `resourceName`
 - `resource: "privatelink"` or `"peering"` → `resourceName` (the ID)
+
+**Before deleting a workspace**, inspect it first:
+1. `atlas-streams-discover` → `inspect-workspace` — get connection/processor counts
+2. Present to user: "Workspace X contains N connections and M processors. Deleting permanently removes all. Proceed?"
+3. Wait for confirmation before calling `atlas-streams-teardown`
 
 ## CRITICAL: Validate Before Creating Processors
 
@@ -123,7 +133,7 @@ Key quickstarts:
 - **`$$NOW`**, **`$$ROOT`**, **`$$CURRENT`** — NOT available in stream processing. NEVER use these. Use the document's own timestamp field or `_stream_meta` metadata for event time instead of `$$NOW`.
 - **HTTPS connections as `$source`** — HTTPS is for `$https` enrichment only
 - **Kafka `$source` without `topic`** — topic field is required
-- **Pipelines without a sink** — `$merge`/`$emit` required for deployed processors (sinkless only works via `sp.process()`)
+- **Pipelines without a sink** — terminal stage (`$merge`, `$emit`, `$https`, or `$externalFunction` async) required for deployed processors (sinkless only works via `sp.process()`)
 - **Lambda as `$emit` target** — Lambda uses `$externalFunction` (mid-pipeline enrichment), not `$emit`
 - **`$validate` with `validationAction: "error"`** — crashes processor; use `"dlq"` instead
 
@@ -148,6 +158,8 @@ Key quickstarts:
 - `bootstrapServers` array → auto-converted to comma-separated string
 - `schemaRegistryUrls` string → auto-wrapped in array
 - `dbRoleToExecute` → defaults to `{role: "readWriteAnyDatabase", type: "BUILT_IN"}` for Cluster connections
+
+**Workspace creation:** `includeSampleData` defaults to `true`, which auto-creates the `sample_stream_solar` connection.
 
 **Region naming:** The `region` field uses Atlas-specific names that differ by cloud provider. Using the wrong format returns a cryptic `dataProcessRegion` error.
 
@@ -196,92 +208,18 @@ Know what each connection type can do before creating pipelines:
 - **Mid-pipeline:** Can use `execution: "sync"` (blocks until Lambda returns) or `execution: "async"` (non-blocking)
 - **Final sink stage:** MUST use `execution: "async"` only
 
-## Tier Reference
-
-| Tier | vCPU | RAM | Max Parallelism | Use case |
-|------|------|-----|-----------------|----------|
-| SP2 | 0.25 | 512MB | 1 | Minimal filtering, testing |
-| SP5 | 0.5 | 1GB | 2 | Simple filtering and routing |
-| SP10 | 1 | 2GB | 8 | Moderate workloads, joins, grouping |
-| SP30 | 2 | 8GB | 16 | Windows, JavaScript UDFs (`$function`), production |
-| SP50 | 8 | 32GB | 64 | High throughput, large window state |
-
-**`$function` (JavaScript UDFs) requires SP30+.** Memory rule: user state must stay below 80% of tier RAM.
-
-For automated tier selection, use the **complexity scoring heuristic** in [`references/sizing-and-parallelism.md`](references/sizing-and-parallelism.md#complexity-scoring-heuristic) — score pipeline features, map to a tier, and take the higher of complexity-driven vs parallelism-driven recommendations.
-
 ## Core Workflows
 
 ### Setup from scratch
 1. `atlas-streams-discover` → `list-workspaces` (check existing)
 2. `atlas-streams-build` → `resource: "workspace"` (region near data, SP10 for dev)
 3. `atlas-streams-build` → `resource: "connection"` (for each source/sink/enrichment)
-4. Call `search-knowledge` to validate field names. Fetch relevant examples from https://github.com/mongodb/ASP_example
-5. `atlas-streams-build` → `resource: "processor"` (with DLQ configured)
-6. `atlas-streams-manage` → `start-processor` (warn about billing)
+4. **Validate connections:** `atlas-streams-discover` → `list-connections` + `inspect-connection` for each — verify names match targets, present summary to user
+5. Call `search-knowledge` to validate field names. Fetch relevant examples from https://github.com/mongodb/ASP_example
+6. `atlas-streams-build` → `resource: "processor"` (with DLQ configured)
+7. `atlas-streams-manage` → `start-processor` (warn about billing)
 
-### Modify a pipeline
-1. `atlas-streams-manage` → `stop-processor`
-2. `atlas-streams-manage` → `modify-processor` (new pipeline)
-3. `atlas-streams-manage` → `start-processor`
-
-- `action: "list-workspaces"` — list all workspaces in a project
-- `action: "inspect-workspace"` — details on a specific workspace
-- `action: "list-connections"` / `"inspect-connection"` — connections in a workspace
-- `action: "list-processors"` / `"inspect-processor"` — processors in a workspace
-- `action: "diagnose-processor"` — combined health report (state, stats, connection health, errors, actionable recommendations)
-- `action: "get-logs"` — operational logs (default) or audit logs. Use `logType: "operational"` for runtime errors (Kafka failures, schema issues, OOM). Use `logType: "audit"` for lifecycle events (start/stop). Optionally filter by `resourceName` (processor name).
-- `action: "get-networking"` — PrivateLink/VPC peering. Optionally provide `cloudProvider` and `region` for account details.
-
-**Pagination** (all list actions): `limit` (1-100, default 20), `pageNum` (default 1).
-**Response format**: `responseFormat` — `"concise"` (default for list actions: names/states only) or `"detailed"` (default for inspect/diagnose: full config).
-
-#### atlas-streams-manage field mapping
-
-Always fill: `projectId`, `workspaceName`. Then by action:
-
-- `"start-processor"` → `resourceName`. Optional: `tier`, `resumeFromCheckpoint`, `startAtOperationTime`
-- `"stop-processor"` → `resourceName`
-- `"modify-processor"` → `resourceName`. At least one of: `pipeline`, `dlq`, `newName`
-- `"update-workspace"` → `newRegion` or `newTier`
-- `"update-connection"` → `resourceName`, `connectionConfig`. Works for updating credentials, bootstrap servers, and other config. **Exception: networking config (e.g., PrivateLink) cannot be modified after creation** — to change networking, delete and recreate the connection.
-- `"accept-peering"` → `peeringId`, `requesterAccountId`, `requesterVpcId`
-- `"reject-peering"` → `peeringId`
-
-#### atlas-streams-teardown field mapping
-
-Always fill: `projectId`, `resource`. Then:
-
-- `resource: "workspace"` → `workspaceName`
-- `resource: "connection"` or `"processor"` → `workspaceName`, `resourceName`
-- `resource: "privatelink"` or `"peering"` → `resourceName` (the ID)
-
-**CRITICAL — Before deleting a workspace:**
-You MUST call `atlas-streams-discover` → `action: "inspect-workspace"` first to get the current count of connections and processors. Then present this information to the user BEFORE asking for confirmation:
-- Number of connections that will be deleted (list their names and types)
-- Number of processors that will be deleted (list their names and states)
-- Make it clear this action is permanent and cannot be undone
-
-Example workflow:
-1. User: "delete workspace X"
-2. Call `inspect-workspace` for workspace X
-3. Present: "Workspace X contains 2 connections (kafka, mongodb_atlas) and 3 processors (processor1: STOPPED, processor2: STARTED, processor3: CREATED). Deleting this workspace will permanently remove all of these resources. Proceed?"
-4. Wait for user confirmation
-5. Call `atlas-streams-teardown`
-
-### Step 3: Sequence multi-step workflows
-
-**Setup from scratch:**
-1. `atlas-streams-build` → `resource: "workspace"` (cloud, region, tier)
-2. `atlas-streams-build` → `resource: "connection"` (one call per connection)
-3. **BEFORE creating processor - REQUIRED VALIDATION**:
-   - Call `atlas-streams-discover` → `action: "list-connections"` to verify all required connections exist
-   - Call `atlas-streams-discover` → `action: "inspect-connection"` for EACH connection referenced in your pipeline
-   - Verify connection names match their actual targets (e.g., connection "atlascluster" should actually point to the intended cluster)
-   - Present connection summary to user showing any name/target mismatches
-   - Ask for confirmation before proceeding if mismatches exist
-4. `atlas-streams-build` → `resource: "processor"` (reference connections by name in pipeline)
-5. Set `autoStart: true` in step 4, or call `atlas-streams-manage` → `action: "start-processor"`
+### Workflow Patterns
 
 **Incremental pipeline development (recommended):**
 See [references/development-workflow.md](references/development-workflow.md) for the full 5-phase lifecycle.
@@ -320,40 +258,7 @@ See [references/output-diagnostics.md](references/output-diagnostics.md) for the
 2. **Propose chained processors**: Processor A reads source → enriches → writes to intermediate via `$merge` (Atlas) or `$emit` (Kafka). Processor B reads from that intermediate (change stream or Kafka topic) → emits to second destination. Kafka-as-intermediate is lower latency; Atlas-as-intermediate is simpler to inspect.
 3. **Show both processor pipelines** including any `$lookup` enrichment stages with `parallelism` settings.
 
-**Tear down:**
-**BEFORE deleting a workspace**, inspect it first with `atlas-streams-discover` → `action: "inspect-workspace"` to determine how many connections and processors will be deleted. Present this information to the user and wait for confirmation before proceeding.
-
-You can delete workspace directly (removes all contained resources), or delete individually: delete processors (auto-stops if running) → delete connections (fails if referenced by running processors) → delete workspace.
-
 Note: `$externalFunction` (Lambda) is a mid-pipeline stage, NOT a terminal sink. A pipeline can use `$externalFunction` AND still have a terminal `$merge`/`$emit` — this is a valid single-sink pattern, but explain WHY it works (Lambda is invoked mid-pipeline, not as a sink).
-
-### Verify after deploy
-1. `atlas-streams-discover` → `inspect-processor` (state = STARTED)
-2. `atlas-streams-discover` → `diagnose-processor` (health report)
-3. MongoDB `count` on DLQ collection (should be 0)
-4. MongoDB `find` on output collection (documents arriving with correct shape)
-5. If output count is 0: check DLQ collection — if DLQ also empty, verify source has data; if DLQ has documents, inspect them for root cause
-
-## Pre-Deploy Checklist
-
-**Connection creation — elicitation:** When creating a connection, the build tool auto-collects missing sensitive fields (passwords, bootstrap servers, usernames) via an interactive form using the MCP elicitation protocol. Do NOT ask the user for these fields yourself — let the tool elicit them.
-
-**Connection creation — auto-normalization:**
-- `bootstrapServers` array → auto-converted to comma-separated string
-- `schemaRegistryUrls` string → auto-wrapped in array
-- `dbRoleToExecute` → auto-defaults to `{role: "readWriteAnyDatabase", type: "BUILT_IN"}` for Cluster connections
-
-**Workspace creation — sample data:** `includeSampleData` defaults to `true`, which auto-creates the `sample_stream_solar` connection via a special API endpoint.
-
-**State pre-checks (manage tool):**
-- `start-processor` → errors if processor is already STARTED
-- `stop-processor` → no-ops if already STOPPED or CREATED (not an error)
-- `modify-processor` → errors if processor is STARTED (must stop first)
-
-**Teardown safety checks:**
-- **Processor deletion** → auto-stops the processor before deleting (no need to stop manually first)
-- **Connection deletion** → scans all processor pipelines for references; **blocks deletion** if any running processor uses the connection. Stop/delete referencing processors first.
-- **Workspace deletion** → YOU must inspect the workspace first with `atlas-streams-discover` to count connections and processors, then present this to the user before calling the teardown tool. The teardown tool will then delete the workspace and all contained resources permanently.
 
 ## Pre-Deploy Quality Checklist
 
@@ -402,6 +307,8 @@ See [references/sizing-and-parallelism.md](references/sizing-and-parallelism.md)
 | SP10 | 1 | 2GB | 200 Mbps | 8 | Unlimited | Moderate workloads, joins, grouping |
 | SP30 | 2 | 8GB | 750 Mbps | 16 | Unlimited | Windows, JavaScript UDFs, production |
 | SP50 | 8 | 32GB | 2500 Mbps | 64 | Unlimited | High throughput, large window state |
+
+**`$function` (JavaScript UDFs) requires SP30+.** For automated tier selection, use the **complexity scoring heuristic** in [`references/sizing-and-parallelism.md`](references/sizing-and-parallelism.md#complexity-scoring-heuristic).
 
 ### Sizing Rules
 - Stream Processing reserves **20% memory for overhead** — user processes are limited to 80%
