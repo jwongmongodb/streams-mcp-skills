@@ -1,28 +1,26 @@
 ---
-name: "MongoDB Atlas Streams"
-description: "Build, operate, and debug Atlas Stream Processing pipelines using MCP tools"
-triggers:
-  - "stream processing"
-  - "streaming pipeline"
-  - "atlas streams"
-  - "ASP"
-  - "kafka pipeline"
-  - "deploy processor"
-  - "stream processor"
-  - "manage streams"
-  - "list processors"
-  - "set up pipeline"
-  - "set up a Kafka pipeline"
-  - "why is my processor failing"
-  - "stop my processor"
-  - "delete my workspace"
+name: streams-mcp-tools
+description: "Build, operate, and debug Atlas Stream Processing pipelines using MCP tools. Use when user mentions stream processing, streaming pipelines, atlas streams, ASP, kafka pipelines, deploying or managing stream processors, setting up pipelines, diagnosing failing processors, stopping processors, deleting workspaces, or any task involving Atlas Stream Processing workspaces, connections, or processors. Do NOT use for general MongoDB queries, Atlas cluster management, or non-streaming operations."
+metadata:
+  version: 4.0.0
+  user-invocable: true
 ---
 
 # MongoDB Atlas Streams
 
-Build, operate, and debug Atlas Stream Processing (ASP) pipelines using four MCP tools from the MongoDB MCP Server: `atlas-streams-discover`, `atlas-streams-build`, `atlas-streams-manage`, and `atlas-streams-teardown`.
+Build, operate, and debug Atlas Stream Processing (ASP) pipelines using four MCP tools from the MongoDB MCP Server.
+
+## Prerequisites
+
+This skill requires the **MongoDB MCP Server** connected with:
+- Atlas API credentials (`apiClientId` and `apiClientSecret`)
+- `previewFeatures: ["streams"]` enabled in the MCP server config
+
+The 4 tools: `atlas-streams-discover`, `atlas-streams-build`, `atlas-streams-manage`, `atlas-streams-teardown`.
 
 ## Tool Selection Matrix
+
+**Every tool call requires `projectId`.** If unknown, call `atlas-list-projects` first.
 
 ### atlas-streams-discover — ALL read operations
 | Action | Use when |
@@ -36,6 +34,9 @@ Build, operate, and debug Atlas Stream Processing (ASP) pipelines using four MCP
 | `diagnose-processor` | Full health report: state, stats, errors |
 | `get-logs` | Operational logs (runtime errors) or audit logs (lifecycle) |
 | `get-networking` | PrivateLink and VPC peering details |
+
+**Pagination** (all list actions): `limit` (1-100, default 20), `pageNum` (default 1).
+**Response format**: `responseFormat` — `"concise"` (default for list actions) or `"detailed"` (default for inspect/diagnose).
 
 ### atlas-streams-build — ALL create operations
 | Resource | Key parameters |
@@ -54,6 +55,11 @@ Build, operate, and debug Atlas Stream Processing (ASP) pipelines using four MCP
 | `update-workspace` | Change tier or region |
 | `update-connection` | Update config (networking is immutable — must delete and recreate) |
 | `accept-peering` / `reject-peering` | VPC peering management |
+
+**State pre-checks:**
+- `start-processor` → errors if processor is already STARTED
+- `stop-processor` → no-ops if already STOPPED or CREATED (not an error)
+- `modify-processor` → errors if processor is STARTED (must stop first)
 
 ### atlas-streams-teardown — ALL delete operations
 | Resource | Safety behavior |
@@ -77,7 +83,7 @@ Also consult the official ASP examples repo: **https://github.com/mongodb/ASP_ex
 ## Pipeline Rules & Warnings
 
 **Invalid constructs** — these are NOT valid in streaming pipelines:
-- **`$$NOW`**, **`$$ROOT`**, **`$$CURRENT`** — NOT available in stream processing. NEVER use these. Use `$_stream_meta.timestamp` for event time instead of `$$NOW`.
+- **`$$NOW`**, **`$$ROOT`**, **`$$CURRENT`** — NOT available in stream processing. NEVER use these. Use the document's own timestamp field or `_stream_meta` metadata for event time instead of `$$NOW`.
 - **HTTPS connections as `$source`** — HTTPS is for `$https` enrichment only
 - **Kafka `$source` without `topic`** — topic field is required
 - **Pipelines without a sink** — `$merge`/`$emit` required for deployed processors (sinkless only works via `sp.process()`)
@@ -124,7 +130,24 @@ When creating a SchemaRegistry connection, show the exact `connectionType` and `
 - `schemaRegistryUrls` string → auto-wrapped in array
 - `dbRoleToExecute` → defaults to `{role: "readWriteAnyDatabase", type: "BUILT_IN"}` for Cluster connections
 
-**Region naming:** AWS uses `VIRGINIA_USA` (us-east-1), `OREGON_USA` (us-west-2); GCP uses `US_CENTRAL1`; Azure uses `US_EAST_1`. If unsure, inspect an existing workspace.
+**Region naming:** The `region` field uses Atlas-specific names that differ by cloud provider. Using the wrong format returns a cryptic `dataProcessRegion` error.
+
+| Provider | Cloud Region | Atlas `region` Value |
+|----------|-------------|---------------------|
+| **AWS** | us-east-1 | `VIRGINIA_USA` |
+| **AWS** | us-east-2 | `US_EAST_2` |
+| **AWS** | us-west-2 | `OREGON_USA` |
+| **AWS** | ca-central-1 | `CA_CENTRAL_1` |
+| **AWS** | sa-east-1 | `SA_EAST_1` |
+| **AWS** | eu-west-1 | `IRELAND_IRL` |
+| **GCP** | us-central1 | `US_CENTRAL1` |
+| **GCP** | europe-west1 | `WESTERN_EUROPE` |
+| **Azure** | eastus | `US_EAST_1` |
+| **Azure** | eastus2 | `US_EAST_2` |
+| **Azure** | westus | `US_WEST` |
+| **Azure** | westeurope | `EUROPE_WEST` |
+
+If unsure, inspect an existing workspace with `atlas-streams-discover` → `inspect-workspace` and check `dataProcessRegion.region`.
 
 ## Tier Reference
 
