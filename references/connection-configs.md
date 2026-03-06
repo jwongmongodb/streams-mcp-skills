@@ -188,13 +188,21 @@ Required IAM policy permissions: `kinesis:ListShards`, `kinesis:SubscribeToShard
 ### SchemaRegistry
 ```json
 {
-  "schemaRegistryUrls": ["https://schema-registry.example.com"],
-  "schemaRegistryAuthentication": {
-    "username": "...",
-    "password": "..."
+  "connectionType": "SchemaRegistry",
+  "connectionConfig": {
+    "schemaRegistryUrls": ["https://schema-registry.example.com"],
+    "schemaRegistryAuthentication": {
+      "type": "USER_INFO",
+      "username": "...",
+      "password": "..."
+    }
   }
 }
 ```
+- `connectionType` MUST be `"SchemaRegistry"` (not `"Kafka"` or `"Https"`)
+- `schemaRegistryUrls` is an **array** (not a string). The tool auto-wraps a string into an array if needed.
+- `schemaRegistryAuthentication.type`: `"USER_INFO"` (explicit credentials) or `"SASL_INHERIT"` (inherit from Kafka connection)
+- Tool elicitation will collect sensitive fields (password) — don't ask the user for these directly
 
 ### Sample
 No connectionConfig required. Provides built-in test data. Useful for development and testing without external infrastructure.
